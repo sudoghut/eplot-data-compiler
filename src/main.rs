@@ -59,7 +59,8 @@ fn main() -> Result<()> {
         "CREATE TABLE IF NOT EXISTS series_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             series_name TEXT UNIQUE,
-            series_year TEXT
+            series_year TEXT,
+            series_month TEXT
         )",
         [],
     )?;
@@ -70,7 +71,8 @@ fn main() -> Result<()> {
             ep_num TEXT,
             ep_year TEXT,
             ep_month TEXT,
-            series_id INTEGER
+            series_id INTEGER,
+            abstract TEXT
         )",
         [],
     )?;
@@ -82,8 +84,9 @@ fn main() -> Result<()> {
 
     use std::collections::HashMap;
     // First pass: collect unique series and their year
-    let mut series_map: HashMap<String, String> = HashMap::new();
-    let mut episodes: Vec<(String, String, String, String)> = Vec::new();
+    let mut series_map: HashMap<String, (String, String)> = HashMap::new();
+    let mut episodes: Vec<(String, String, String, String, String)> = Vec::new();
+    let desc_re = Regex::new(r#"description:\s*["']?([^"\n']*)"#).unwrap();
     for path in &md_files {
         let filename = path.file_name().unwrap().to_string_lossy();
         let parts: Vec<&str> = filename.split('_').collect();
@@ -96,6 +99,7 @@ fn main() -> Result<()> {
         let content = fs::read_to_string(&path).unwrap_or_default();
         let mut ep_year = String::new();
         let mut ep_month = String::new();
+        let mut abstract_text = String::new();
 
         if let Some(tag_caps) = tag_re.captures(&content) {
             if let Some(tags_str) = tag_caps.get(1) {
@@ -109,27 +113,57 @@ fn main() -> Result<()> {
             }
         }
 
-        // Insert series_name and year if not already present
-        series_map.entry(series_name.clone()).or_insert(ep_year.clone());
-        episodes.push((series_name, ep_num, ep_year, ep_month));
+        if let Some(desc_caps) = desc_re.captures(&content) {
+            abstract_text = desc_caps.get(1).map_or(String::new(), |m| m.as_str().trim().to_string());
+        }
+        if abstract_text.is_empty() {
+            // Find content after the second '---'
+            let mut lines = content.lines();
+            let mut dash_count = 0;
+            let mut below = String::new();
+            while let Some(line) = lines.next() {
+                if line.trim() == "---" {
+                    dash_count += 1;
+                    if dash_count == 2 {
+                        break;
+                    }
+                }
+            }
+            // Collect the rest of the lines as content
+            for line in lines {
+                below.push_str(line.trim());
+                below.push(' ');
+            }
+            let below = below.trim();
+            let below_chars: String = below.chars().take(200).collect();
+            if below.chars().count() > 200 {
+                abstract_text = format!("{}...", below_chars);
+            } else {
+                abstract_text = below_chars;
+            }
+        }
+
+        // Insert series_name and (year, month) if not already present
+        series_map.entry(series_name.clone()).or_insert((ep_year.clone(), ep_month.clone()));
+        episodes.push((series_name, ep_num, ep_year, ep_month, abstract_text));
     }
 
     // Insert unique series into series_data
-    for (series_name, series_year) in &series_map {
+    for (series_name, (series_year, series_month)) in &series_map {
         conn.execute(
-            "INSERT INTO series_data (series_name, series_year) VALUES (?1, ?2)",
-            params![series_name, series_year],
+            "INSERT INTO series_data (series_name, series_year, series_month) VALUES (?1, ?2, ?3)",
+            params![series_name, series_year, series_month],
         )?;
     }
 
     // Insert episodes with correct series_id
-    for (series_name, ep_num, ep_year, ep_month) in episodes {
+    for (series_name, ep_num, ep_year, ep_month, abstract_text) in episodes {
         let mut stmt = conn.prepare("SELECT id FROM series_data WHERE series_name = ?1")?;
         let series_id: i64 = stmt.query_row(params![series_name], |row| row.get(0))?;
-        println!("Inserting: {}, {}, {}, {}, series_id={}", series_name, ep_num, ep_year, ep_month, series_id);
+        println!("Inserting: {}, {}, {}, {}, series_id={}, abstract={}", series_name, ep_num, ep_year, ep_month, series_id, abstract_text);
         conn.execute(
-            "INSERT INTO ep_data (ep_name, ep_num, ep_year, ep_month, series_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![series_name, ep_num, ep_year, ep_month, series_id],
+            "INSERT INTO ep_data (ep_name, ep_num, ep_year, ep_month, series_id, abstract) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![series_name, ep_num, ep_year, ep_month, series_id, abstract_text],
         )?;
     }
 
