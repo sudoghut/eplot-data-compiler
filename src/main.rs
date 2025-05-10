@@ -56,22 +56,38 @@ fn main() -> Result<()> {
     // Open SQLite connection
     let conn = Connection::open("data.db")?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS data (
-            ep_name TEXT,
-            ep_num TEXT,
-            ep_year TEXT,
-            ep_month TEXT
+        "CREATE TABLE IF NOT EXISTS series_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            series_name TEXT UNIQUE,
+            series_year TEXT
         )",
         [],
     )?;
-    // Empty the data table before inserting new data
-    conn.execute("DELETE FROM data", [])?;
-    conn.execute("DELETE FROM sqlite_sequence WHERE name='data'", [])?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ep_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ep_name TEXT,
+            ep_num TEXT,
+            ep_year TEXT,
+            ep_month TEXT,
+            series_id INTEGER
+        )",
+        [],
+    )?;
+    // Empty the tables before inserting new data
+    conn.execute("DELETE FROM ep_data", [])?;
+    conn.execute("DELETE FROM sqlite_sequence WHERE name='ep_data'", [])?;
+    conn.execute("DELETE FROM series_data", [])?;
+    conn.execute("DELETE FROM sqlite_sequence WHERE name='series_data'", [])?;
 
-    for path in md_files {
+    use std::collections::HashMap;
+    // First pass: collect unique series and their year
+    let mut series_map: HashMap<String, String> = HashMap::new();
+    let mut episodes: Vec<(String, String, String, String)> = Vec::new();
+    for path in &md_files {
         let filename = path.file_name().unwrap().to_string_lossy();
         let parts: Vec<&str> = filename.split('_').collect();
-        let (ep_name, ep_num) = if parts.len() >= 2 {
+        let (series_name, ep_num) = if parts.len() >= 2 {
             (parts[0].to_string(), parts[1].trim_end_matches(".md").to_string())
         } else {
             (filename.to_string(), "".to_string())
@@ -93,10 +109,27 @@ fn main() -> Result<()> {
             }
         }
 
-        println!("Inserting: {}, {}, {}, {}", ep_name, ep_num, ep_year, ep_month);
+        // Insert series_name and year if not already present
+        series_map.entry(series_name.clone()).or_insert(ep_year.clone());
+        episodes.push((series_name, ep_num, ep_year, ep_month));
+    }
+
+    // Insert unique series into series_data
+    for (series_name, series_year) in &series_map {
         conn.execute(
-            "INSERT INTO data (ep_name, ep_num, ep_year, ep_month) VALUES (?1, ?2, ?3, ?4)",
-            params![ep_name, ep_num, ep_year, ep_month],
+            "INSERT INTO series_data (series_name, series_year) VALUES (?1, ?2)",
+            params![series_name, series_year],
+        )?;
+    }
+
+    // Insert episodes with correct series_id
+    for (series_name, ep_num, ep_year, ep_month) in episodes {
+        let mut stmt = conn.prepare("SELECT id FROM series_data WHERE series_name = ?1")?;
+        let series_id: i64 = stmt.query_row(params![series_name], |row| row.get(0))?;
+        println!("Inserting: {}, {}, {}, {}, series_id={}", series_name, ep_num, ep_year, ep_month, series_id);
+        conn.execute(
+            "INSERT INTO ep_data (ep_name, ep_num, ep_year, ep_month, series_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![series_name, ep_num, ep_year, ep_month, series_id],
         )?;
     }
 
