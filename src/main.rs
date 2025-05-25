@@ -6,6 +6,18 @@ use std::process::Command;
 use regex::Regex;
 use rusqlite::{params, Connection, Result};
 
+// Helper function to clean series names by removing episode numbers
+fn clean_series_name(name: &str) -> String {
+    if let Some(last_space_idx) = name.rfind(' ') {
+        let (base_name, episode_part) = name.split_at(last_space_idx);
+        let ep_part = episode_part.trim();
+        if ep_part.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return base_name.trim().to_string();
+        }
+    }
+    name.to_string()
+}
+
 fn main() -> Result<()> {
     let repo_url = "https://github.com/sudoghut/eplot";
     let repo_dir = "eplot";
@@ -49,9 +61,10 @@ fn main() -> Result<()> {
     md_files.sort();
     // md_files.truncate(5);
 
-    // Prepare regex for tags
+    // Prepare regex patterns
     let tag_re = Regex::new(r"tags:\s*\[([^\]]*)\]").unwrap();
     let yyyymm_re = Regex::new(r"\d{6}").unwrap();
+    let title_re = Regex::new(r#"title:\s*"([^"]*)""#).unwrap();
 
     // Open SQLite connection
     let conn = Connection::open("data.db")?;
@@ -88,15 +101,25 @@ fn main() -> Result<()> {
     let mut episodes: Vec<(String, String, String, String, String)> = Vec::new();
     let desc_re = Regex::new(r#"description:\s*["']?([^"\n']*)"#).unwrap();
     for path in &md_files {
+        let content = fs::read_to_string(&path).unwrap_or_default();
         let filename = path.file_name().unwrap().to_string_lossy();
         let parts: Vec<&str> = filename.split('_').collect();
         let (series_name, ep_num) = if parts.len() >= 2 {
-            (parts[0].to_string(), parts[1].trim_end_matches(".md").to_string())
+            // Get title from markdown or filename
+            let full_title = if let Some(title_caps) = title_re.captures(&content) {
+                title_caps.get(1).map_or(parts[0].to_string(), |m| m.as_str().to_string())
+            } else {
+                parts[0].to_string()
+            };
+            
+            // Clean the series name by removing episode number if present at end
+            let clean_name = clean_series_name(&full_title);
+            
+            (clean_name, parts[1].trim_end_matches(".md").to_string())
         } else {
             (filename.to_string(), "".to_string())
         };
 
-        let content = fs::read_to_string(&path).unwrap_or_default();
         let mut ep_year = String::new();
         let mut ep_month = String::new();
         let mut abstract_text = String::new();
@@ -143,12 +166,13 @@ fn main() -> Result<()> {
             }
         }
 
-        // Insert series_name and (year, month) if not already present
+        // Store series info with clean name
         series_map.entry(series_name.clone()).or_insert((ep_year.clone(), ep_month.clone()));
-        episodes.push((series_name, ep_num, ep_year, ep_month, abstract_text));
+        // Store full episode info with clean name reference
+        episodes.push((series_name.clone(), ep_num, ep_year, ep_month, abstract_text));
     }
 
-    // Insert unique series into series_data
+    // Insert unique series into series_data (names are already cleaned)
     for (series_name, (series_year, series_month)) in &series_map {
         conn.execute(
             "INSERT INTO series_data (series_name, series_year, series_month) VALUES (?1, ?2, ?3)",
@@ -158,8 +182,9 @@ fn main() -> Result<()> {
 
     // Insert episodes with correct series_id
     for (series_name, ep_num, ep_year, ep_month, abstract_text) in episodes {
+        let clean_name = clean_series_name(&series_name);
         let mut stmt = conn.prepare("SELECT id FROM series_data WHERE series_name = ?1")?;
-        let series_id: i64 = stmt.query_row(params![series_name], |row| row.get(0))?;
+        let series_id: i64 = stmt.query_row(params![clean_name], |row| row.get(0))?;
         println!("Inserting: {}, {}, {}, {}, series_id={}, abstract={}", series_name, ep_num, ep_year, ep_month, series_id, abstract_text);
         conn.execute(
             "INSERT INTO ep_data (ep_name, ep_num, ep_year, ep_month, series_id, abstract) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
