@@ -185,7 +185,7 @@ fn main() -> Result<()> {
         let clean_name = clean_series_name(&series_name);
         let mut stmt = conn.prepare("SELECT id FROM series_data WHERE series_name = ?1")?;
         let series_id: i64 = stmt.query_row(params![clean_name], |row| row.get(0))?;
-        println!("Inserting: {}, {}, {}, {}, series_id={}, abstract={}", series_name, ep_num, ep_year, ep_month, series_id, abstract_text);
+        // println!("Inserting: {}, {}, {}, {}, series_id={}, abstract={}", series_name, ep_num, ep_year, ep_month, series_id, abstract_text);
         conn.execute(
             "INSERT INTO ep_data (ep_name, ep_num, ep_year, ep_month, series_id, abstract) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![series_name, ep_num, ep_year, ep_month, series_id, abstract_text],
